@@ -24,6 +24,7 @@ import (
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/fdnotifier"
 	"gvisor.dev/gvisor/pkg/hostarch"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/metric"
 	"gvisor.dev/gvisor/pkg/p9"
 	"gvisor.dev/gvisor/pkg/safemem"
@@ -94,7 +95,8 @@ type specialFileFD struct {
 func newSpecialFileFD(h handle, mnt *vfs.Mount, d *dentry, flags uint32) (*specialFileFD, error) {
 	ftype := d.fileType()
 	seekable := ftype == linux.S_IFREG || ftype == linux.S_IFCHR || ftype == linux.S_IFBLK
-	haveQueue := (ftype == linux.S_IFIFO || ftype == linux.S_IFSOCK) && h.fd >= 0
+	haveQueue := (ftype == linux.S_IFIFO || ftype == linux.S_IFSOCK || ftype == linux.S_IFCHR) && h.fd >= 0
+	log.Infof("FOO new special file, name: %q, fd: %d, type: %d, seek: %v, queue: %v", d.name, h.fd, ftype, seekable, haveQueue)
 	fd := &specialFileFD{
 		handle:        h,
 		isRegularFile: ftype == linux.S_IFREG,
@@ -169,6 +171,7 @@ func (fd *specialFileFD) EventRegister(e *waiter.Entry) error {
 	if fd.haveQueue {
 		fd.queue.EventRegister(e)
 		if err := fdnotifier.UpdateFD(fd.handle.fd); err != nil {
+			log.Infof("FOO specialFileFD.EventRegister: %v", err)
 			fd.queue.EventUnregister(e)
 			return err
 		}
@@ -192,9 +195,12 @@ func (fd *specialFileFD) EventUnregister(e *waiter.Entry) {
 // Epollable implements FileDescriptionImpl.Epollable.
 func (fd *specialFileFD) Epollable() bool {
 	if fd.haveQueue {
+		log.Infof("FOO specialFileFD.Epollable: true")
 		return true
 	}
-	return fd.fileDescription.Epollable()
+	b := fd.fileDescription.Epollable()
+	log.Infof("FOO specialFileFD.Epollable: %v", b)
+	return b
 }
 
 func (fd *specialFileFD) Allocate(ctx context.Context, mode, offset, length uint64) error {

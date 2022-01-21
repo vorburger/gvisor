@@ -27,6 +27,7 @@ import (
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/fspath"
 	"gvisor.dev/gvisor/pkg/lisafs"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/p9"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/host"
 	"gvisor.dev/gvisor/pkg/sentry/fsmetric"
@@ -1092,6 +1093,8 @@ func (d *dentry) open(ctx context.Context, rp *vfs.ResolvingPath, opts *vfs.Open
 		d.metadataMu.Lock()
 		defer d.metadataMu.Unlock()
 	}
+
+	log.Infof("FOO dentry.open, name: %q, type: %d", d.name, d.fileType())
 
 	var vfd *vfs.FileDescription
 	var err error
