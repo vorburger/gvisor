@@ -320,48 +320,6 @@ steps:
       arch: "amd64"
       os: "ubuntu"
 
-  # Runtime tests (LISAFS).
-  - <<: *common
-    label: ":php: PHP runtime tests (LISAFS)"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} php8.1.1-runtime-tests_lisafs
-    parallelism: 10
-    if: build.message =~ /lisafs/ || build.branch == "master"
-    agents:
-      arch: "amd64"
-      os: "ubuntu"
-  - <<: *common
-    label: ":java: Java runtime tests (LISAFS)"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} java17-runtime-tests_lisafs
-    parallelism: 40
-    if: build.message =~ /lisafs/ || build.branch == "master"
-    agents:
-      arch: "amd64"
-      os: "ubuntu"
-  - <<: *common
-    label: ":golang: Go runtime tests (LISAFS)"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} go1.16-runtime-tests_lisafs
-    parallelism: 10
-    if: build.message =~ /lisafs/ || build.branch == "master"
-    agents:
-      arch: "amd64"
-      os: "ubuntu"
-  - <<: *common
-    label: ":node: NodeJS runtime tests (LISAFS)"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} nodejs16.13.2-runtime-tests_lisafs
-    parallelism: 10
-    if: build.message =~ /lisafs/ || build.branch == "master"
-    agents:
-      arch: "amd64"
-      os: "ubuntu"
-  - <<: *common
-    label: ":python: Python runtime tests (LISAFS)"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} python3.10.2-runtime-tests_lisafs
-    parallelism: 10
-    if: build.message =~ /lisafs/ || build.branch == "master"
-    agents:
-      arch: "amd64"
-      os: "ubuntu"
-
   # Build everything.
   - <<: *common
     label: ":world_map: Build everything"

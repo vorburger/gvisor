@@ -48,7 +48,7 @@ var (
 	fileAccess         = flag.String("file-access", "exclusive", "mounts root in exclusive or shared mode")
 	overlay            = flag.Bool("overlay", false, "wrap filesystem mounts with writable tmpfs overlay")
 	fuse               = flag.Bool("fuse", false, "enable FUSE")
-	lisafs             = flag.Bool("lisafs", false, "enable lisafs protocol if vfs2 is also enabled")
+	lisafs             = flag.Bool("lisafs", true, "enable lisafs protocol if vfs2 is also enabled")
 	container          = flag.Bool("container", false, "run tests in their own namespaces (user ns, network ns, etc), pretending to be root")
 	setupContainerPath = flag.String("setup-container", "", "path to setup_container binary (for use with --container)")
 
@@ -172,6 +172,7 @@ func runRunsc(tc gtest.TestCase, spec *specs.Spec) error {
 		"-TESTONLY-allow-packet-endpoint-write=true",
 		"-net-raw=true",
 		fmt.Sprintf("-panic-signal=%d", unix.SIGTERM),
+		fmt.Sprintf("-lisafs=%t", *lisafs),
 		"-watchdog-action=panic",
 		"-platform", *platform,
 		"-file-access", *fileAccess,
@@ -181,9 +182,6 @@ func runRunsc(tc gtest.TestCase, spec *specs.Spec) error {
 	}
 	if *fuse {
 		args = append(args, "-fuse")
-	}
-	if *lisafs {
-		args = append(args, "-lisafs")
 	}
 	if *debug {
 		args = append(args, "-debug", "-log-packets=true")

@@ -136,7 +136,6 @@ go_test(
         "//pkg/control/server",
         "//pkg/fspath",
         "//pkg/log",
-        "//pkg/p9",
         "//pkg/sentry/vfs",
         "//pkg/sync",
         "//pkg/unet",

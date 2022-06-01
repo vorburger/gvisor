@@ -60,7 +60,7 @@ def _syscall_test(
         file_access = "exclusive",
         overlay = False,
         add_uds_tree = False,
-        lisafs = False,
+        lisafs = True,
         fuse = False,
         **kwargs):
     # Prepend "runsc" to non-native platform names.
@@ -135,7 +135,6 @@ def syscall_test(
         add_overlay = False,
         add_uds_tree = False,
         add_hostinet = False,
-        add_lisafs = True,
         fuse = False,
         allow_native = True,
         debug = True,
@@ -149,7 +148,6 @@ def syscall_test(
       add_overlay: add an overlay test.
       add_uds_tree: add a UDS test.
       add_hostinet: add a hostinet test.
-      add_lisafs: add a lisafs test.
       fuse: enable FUSE support.
       allow_native: generate a native test variant.
       debug: enable debug output.
@@ -183,19 +181,18 @@ def syscall_test(
             **kwargs
         )
 
-    if add_lisafs:
-        # Generate a *_lisafs variant with the default platform.
-        _syscall_test(
-            test = test,
-            platform = default_platform,
-            use_tmpfs = use_tmpfs,
-            add_uds_tree = add_uds_tree,
-            tags = platforms[default_platform] + tags + ["lisafs"],
-            debug = debug,
-            fuse = fuse,
-            lisafs = True,
-            **kwargs
-        )
+    # Generate a P9 variant with the default platform.
+    _syscall_test(
+        test = test,
+        platform = default_platform,
+        use_tmpfs = use_tmpfs,
+        add_uds_tree = add_uds_tree,
+        tags = platforms[default_platform] + tags,
+        debug = debug,
+        fuse = fuse,
+        lisafs = False,
+        **kwargs
+    )
     if add_overlay:
         _syscall_test(
             test = test,

@@ -82,7 +82,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 	flagSet.Bool("fsgofer-host-uds", false, "allow the gofer to mount Unix Domain Sockets.")
 	flagSet.Bool("vfs2", true, "DEPRECATED: this flag has no effect.")
 	flagSet.Bool("fuse", false, "TEST ONLY; use while FUSE in VFSv2 is landing. This allows the use of the new experimental FUSE filesystem.")
-	flagSet.Bool("lisafs", false, "Enables lisafs protocol instead of 9P.")
+	flagSet.Bool("lisafs", true, "Enables lisafs protocol instead of 9P.")
 	flagSet.Bool("cgroupfs", false, "Automatically mount cgroupfs.")
 	flagSet.Bool("ignore-cgroups", false, "don't configure cgroups.")
 
