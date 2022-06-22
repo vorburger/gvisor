@@ -733,21 +733,23 @@ func (fs *filesystem) MkdirAt(ctx context.Context, rp *vfs.ResolvingPath, opts v
 			}
 			return err
 		}
-		if haveUpperWhiteout {
-			// There may be directories on lower layers (previously hidden by
-			// the whiteout) that the new directory should not be merged with.
-			// Mark it opaque to prevent merging.
-			if err := vfsObj.SetXattrAt(ctx, fs.creds, &pop, &vfs.SetXattrOptions{
-				Name:  _OVL_XATTR_OPAQUE,
-				Value: "y",
-			}); err != nil {
-				if cleanupErr := vfsObj.RmdirAt(ctx, fs.creds, &pop); cleanupErr != nil {
-					panic(fmt.Sprintf("unrecoverable overlayfs inconsistency: failed to delete upper layer directory after MkdirAt set-opaque failure: %v", cleanupErr))
-				} else {
-					fs.cleanupRecreateWhiteout(ctx, vfsObj, &pop)
-				}
-				return err
+		// If haveUpperWhiteout is true, there may be directories on lower layers
+		// (previously hidden by the whiteout) that the new directory should not be
+		// merged with.  Mark it opaque to prevent merging.
+		// If haveUpperWhiteout is false, then nothing exists in the lower layers.
+		// Otherwise doCreateAt() would have failed with EEXIST. Mark it opaque to
+		// avoid lower lookups.
+		if err := vfsObj.SetXattrAt(ctx, fs.creds, &pop, &vfs.SetXattrOptions{
+			Name:  _OVL_XATTR_OPAQUE,
+			Value: "y",
+		}); err != nil {
+			if cleanupErr := vfsObj.RmdirAt(ctx, fs.creds, &pop); cleanupErr != nil {
+				panic(fmt.Sprintf("unrecoverable overlayfs inconsistency: failed to delete upper layer directory after MkdirAt set-opaque failure: %v", cleanupErr))
 			}
+			if haveUpperWhiteout {
+				fs.cleanupRecreateWhiteout(ctx, vfsObj, &pop)
+			}
+			return err
 		}
 		return nil
 	})
