@@ -187,8 +187,7 @@ func (fs *filesystem) CompleteRestore(ctx context.Context, opts vfs.CompleteRest
 		return fmt.Errorf("no server FD available for filesystem with unique ID %q", fs.iopts.UniqueID)
 	}
 	fs.opts.fd = fd
-	fs.inoByQIDPath = make(map[uint64]uint64)
-	fs.inoByKey = make(map[inoKey]uint64)
+	fs.remoteDevToSentry = make(map[uint64]uint32)
 
 	if fs.opts.lisaEnabled {
 		rootInode, err := fs.initClientLisa(ctx)
@@ -256,6 +255,22 @@ func (fs *filesystem) CompleteRestore(ctx context.Context, opts vfs.CompleteRest
 	return nil
 }
 
+func (d *dentry) associateRemoteDevToDevMinor(remoteDev uint64) error {
+	d.fs.devMinorMu.Lock()
+	defer d.fs.devMinorMu.Unlock()
+
+	if devMinor, ok := d.fs.remoteDevToSentry[remoteDev]; ok {
+		if devMinor != d.devMinor {
+			// This means that two files that previously (before save) shared the
+			// same remoteDev are now (after restore) on different devices.
+			return vfs.ErrCorruption{fmt.Errorf("gofer.dentry(%q).restoreFile: remote dev %d is already associated with minor %d, but was earlier associated with %d", genericDebugPathname(d), remoteDev, devMinor, d.devMinor)}
+		}
+		return nil
+	}
+	d.fs.remoteDevToSentry[remoteDev] = d.devMinor
+	return nil
+}
+
 func (d *dentry) restoreFile(ctx context.Context, file p9file, qid p9.QID, attrMask p9.AttrMask, attr *p9.Attr, opts *vfs.CompleteRestoreOptions) error {
 	d.file = file
 
@@ -265,11 +280,18 @@ func (d *dentry) restoreFile(ctx context.Context, file p9file, qid p9.QID, attrM
 	//		would invalidate dentries, since we can't revalidate dentries by
 	//		checking QIDs.
 	//
-	//	- We need to associate the new QID.Path with the existing d.ino.
-	d.qidPath = qid.Path
-	d.fs.inoMu.Lock()
-	d.fs.inoByQIDPath[qid.Path] = d.ino
-	d.fs.inoMu.Unlock()
+	//	- We need to associate the new remote device with d.devMinor.
+	//
+	//	- We need to associate the new qid.Path to the existing d.ino.
+
+	if !attrMask.RDev {
+		return vfs.ErrCorruption{fmt.Errorf("gofer.dentry(%q).restoreFile: RDev not available", genericDebugPathname(d))}
+	}
+	if err := d.associateRemoteDevToDevMinor(attr.RDev); err != nil {
+		return err
+	}
+	// FIXME(ayushranjan): We can't change d.ino. What to do here?
+	d.ino = qid.Path
 
 	// Check metadata stability before updating metadata.
 	d.metadataMu.Lock()
@@ -314,11 +336,15 @@ func (d *dentry) restoreFileLisa(ctx context.Context, inode *lisafs.Inode, opts 
 	//		would invalidate dentries, since we can't revalidate dentries by
 	//		checking inoKey.
 	//
-	//	- We need to associate the new inoKey with the existing d.ino.
-	d.inoKey = inoKeyFromStat(&inode.Stat)
-	d.fs.inoMu.Lock()
-	d.fs.inoByKey[d.inoKey] = d.ino
-	d.fs.inoMu.Unlock()
+	//	- We need to associate the new remote device with d.devMinor.
+	//
+	//	- We need to associate the new qid.Path to the existing d.ino.
+
+	if err := d.associateRemoteDevToDevMinor(uint64(inode.Stat.DevMajor)<<32 | uint64(inode.Stat.DevMinor)); err != nil {
+		return err
+	}
+	// FIXME(ayushranjan): We can't change d.ino. What to do here?
+	d.ino = inode.Stat.Ino
 
 	// Check metadata stability before updating metadata.
 	d.metadataMu.Lock()

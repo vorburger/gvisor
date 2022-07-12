@@ -77,16 +77,6 @@ type attachPoint struct {
 	// attachedMu protects attached.
 	attachedMu sync.Mutex
 	attached   bool
-
-	// deviceMu protects devices and nextDevice.
-	deviceMu sync.Mutex
-
-	// nextDevice is the next device id that will be allocated.
-	nextDevice uint8
-
-	// devices is a map from actual host devices to "small" integers that
-	// can be combined with host inode to form a unique virtual inode id.
-	devices map[uint64]uint8
 }
 
 // NewAttachPoint creates a new attacher that gives local file
@@ -97,9 +87,8 @@ func NewAttachPoint(prefix string, c Config) (p9.Attacher, error) {
 		return nil, fmt.Errorf("attach point prefix must be absolute %q", prefix)
 	}
 	return &attachPoint{
-		prefix:  prefix,
-		conf:    c,
-		devices: make(map[uint64]uint8),
+		prefix: prefix,
+		conf:   c,
 	}, nil
 }
 
@@ -146,30 +135,9 @@ func (a *attachPoint) ServerOptions() p9.AttacherOptions {
 
 // makeQID returns a unique QID for the given stat buffer.
 func (a *attachPoint) makeQID(stat *unix.Stat_t) p9.QID {
-	a.deviceMu.Lock()
-	defer a.deviceMu.Unlock()
-
-	// First map the host device id to a unique 8-bit integer.
-	dev, ok := a.devices[stat.Dev]
-	if !ok {
-		a.devices[stat.Dev] = a.nextDevice
-		dev = a.nextDevice
-		a.nextDevice++
-		if a.nextDevice < dev {
-			panic(fmt.Sprintf("device id overflow! map: %+v", a.devices))
-		}
-	}
-
-	// Construct a "virtual" inode id with the uint8 device number in the
-	// first 8 bits, and the rest of the bits from the host inode id.
-	maskedIno := stat.Ino & 0x00ffffffffffffff
-	if maskedIno != stat.Ino {
-		log.Warningf("first 8 bytes of host inode id %x will be truncated to construct virtual inode id", stat.Ino)
-	}
-	ino := uint64(dev)<<56 | maskedIno
 	return p9.QID{
 		Type: p9.FileMode(stat.Mode).QIDType(),
-		Path: ino,
+		Path: stat.Ino,
 	}
 }
 
@@ -651,7 +619,7 @@ func (l *localFile) fillAttr(stat *unix.Stat_t) (p9.AttrMask, p9.Attr) {
 		UID:              p9.UID(stat.Uid),
 		GID:              p9.GID(stat.Gid),
 		NLink:            uint64(stat.Nlink),
-		RDev:             stat.Rdev,
+		RDev:             stat.Dev,
 		Size:             uint64(stat.Size),
 		BlockSize:        uint64(stat.Blksize),
 		Blocks:           uint64(stat.Blocks),
@@ -1032,54 +1000,50 @@ func (l *localFile) Readdir(offset uint64, count uint32) ([]p9.Dirent, error) {
 func (l *localFile) readDirent(f int, offset uint64, count uint32, skip uint64) ([]p9.Dirent, error) {
 	var dirents []p9.Dirent
 
-	// Limit 'count' to cap the slice size that is returned.
-	const maxCount = 100000
+	// Limit 'count' to cap the amount of data that is returned.
+	const maxCount = 100_000
 	if count > maxCount {
 		count = maxCount
 	}
 
 	// Pre-allocate buffers that will be reused to get partial results.
 	direntsBuf := make([]byte, 8192)
-	names := make([]string, 0, 100)
-
-	end := offset + uint64(count)
-	for offset < end {
-		dirSize, err := unix.ReadDirent(f, direntsBuf)
+	var bytesRead int
+	for bytesRead < int(count) {
+		bufEnd := len(direntsBuf)
+		if remaining := int(count) - bytesRead; remaining < bufEnd {
+			bufEnd = remaining
+		}
+		n, err := unix.Getdents(f, direntsBuf[:bufEnd])
 		if err != nil {
+			if err == unix.EINVAL && bufEnd < 268 {
+				// getdents64(2) returns EINVAL is returned when the result
+				// buffer is too small. If bufEnd is smaller than the max
+				// size of unix.Dirent, then just break here to return all
+				// dirents collected till now.
+				return dirents, nil
+			}
 			return dirents, err
 		}
-		if dirSize <= 0 {
+		if n <= 0 {
 			return dirents, nil
 		}
 
-		names := names[:0]
-		_, _, names = unix.ParseDirent(direntsBuf[:dirSize], -1, names)
-
-		// Skip over entries that the caller is not interested in.
-		if skip > 0 {
-			if skip > uint64(len(names)) {
-				skip -= uint64(len(names))
-				names = names[:0]
-			} else {
-				names = names[skip:]
-				skip = 0
+		bytesRead += parseDirents(direntsBuf[:n], func(ino uint64, off int64, ftype uint8, name string) bool {
+			if skip > 0 {
+				skip--
+				return false
 			}
-		}
-		for _, name := range names {
-			stat, err := statAt(l.file.FD(), name)
-			if err != nil {
-				log.Warningf("Readdir is skipping file %q with failed stat, err: %v", path.Join(l.hostPath, name), err)
-				continue
-			}
-			qid := l.attachPoint.makeQID(&stat)
 			offset++
+			qidType := p9.QIDTypeFromDirent(ftype)
 			dirents = append(dirents, p9.Dirent{
-				QID:    qid,
-				Type:   qid.Type,
+				QID:    p9.QID{Path: ino, Type: qidType},
+				Type:   qidType,
 				Name:   name,
 				Offset: offset,
 			})
-		}
+			return true
+		})
 	}
 	return dirents, nil
 }

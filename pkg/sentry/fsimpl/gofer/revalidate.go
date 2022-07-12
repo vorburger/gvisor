@@ -279,9 +279,9 @@ func (fs *filesystem) revalidateHelper(ctx context.Context, vfsObj *vfs.VirtualF
 		// Note that synthetic dentries will always fail this comparison check.
 		var shouldInvalidate bool
 		if fs.opts.lisaEnabled {
-			shouldInvalidate = !found || d.inoKey != inoKeyFromStat(&statsLisa[i])
+			shouldInvalidate = !found || d.ino != statsLisa[i].Ino || d.devMinor != fs.getDeviceMinorLisa(statsLisa[i].DevMinor, statsLisa[i].DevMajor)
 		} else {
-			shouldInvalidate = !found || d.qidPath != stats[i].QID.Path
+			shouldInvalidate = !found || d.ino != stats[i].QID.Path || d.devMinor != fs.getDeviceMinor(stats[i].Attr.RDev)
 		}
 		if shouldInvalidate {
 			d.metadataMu.Unlock() // +checklocksforce: see above.

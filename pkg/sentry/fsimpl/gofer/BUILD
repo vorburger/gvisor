@@ -98,5 +98,6 @@ go_test(
         "//pkg/p9",
         "//pkg/sentry/contexttest",
         "//pkg/sentry/pgalloc",
+        "//pkg/sentry/vfs",
     ],
 )

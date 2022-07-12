@@ -208,6 +208,22 @@ func (m FileMode) QIDType() QIDType {
 	}
 }
 
+// QIDTypeFromDirent converts DT_* constants returned from getdents(2) to
+// QIDType.
+func QIDTypeFromDirent(ftype uint8) QIDType {
+	switch ftype {
+	case unix.DT_DIR:
+		return TypeDir
+	case unix.DT_SOCK, unix.DT_FIFO, unix.DT_CHR:
+		// Best approximation.
+		return TypeAppendOnly
+	case unix.DT_LNK:
+		return TypeSymlink
+	default:
+		return TypeRegular
+	}
+}
+
 // FileType returns the file mode without the permission bits.
 func (m FileMode) FileType() FileMode {
 	return m & FileModeMask

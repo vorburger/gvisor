@@ -29,7 +29,7 @@
 //	            *** "memmap.Mappable locks taken by Translate" below this point
 //	            dentry.handleMu
 //	              dentry.dataMu
-//	          filesystem.inoMu
+//	          filesystem.devMinorMu
 //	specialFileFD.mu
 //	  specialFileFD.bufMu
 //
@@ -40,6 +40,7 @@ package gofer
 
 import (
 	"fmt"
+	"math"
 	"path"
 	"strconv"
 	"strings"
@@ -153,9 +154,6 @@ type filesystem struct {
 	// clock is a realtime clock used to set timestamps in file operations.
 	clock ktime.Clock
 
-	// devMinor is the filesystem's minor device number. devMinor is immutable.
-	devMinor uint32
-
 	// root is the root dentry. root is immutable.
 	root *dentry
 
@@ -179,23 +177,21 @@ type filesystem struct {
 	syncableDentries map[*dentry]struct{}
 	specialFileFDs   map[*specialFileFD]struct{}
 
-	// inoByQIDPath maps previously-observed QID.Paths to inode numbers
-	// assigned to those paths. inoByQIDPath is not preserved across
-	// checkpoint/restore because QIDs may be reused between different gofer
-	// processes, so QIDs may be repeated for different files across
-	// checkpoint/restore. inoByQIDPath is protected by inoMu.
-	inoMu        sync.Mutex        `state:"nosave"`
-	inoByQIDPath map[uint64]uint64 `state:"nosave"`
+	// remoteDevToSentry keeps the mapping between remote device numbers to
+	// sentry internal dev minor numbers. This is expected to be a sparse map.
+	// It is keyed by (major dev number << 32 | minor dev number). It is
+	// protected by devMinorMu.
+	devMinorMu sync.RWMutex `state:"nosave"`
+	// TODO(ayushranjan): Implement this as a sparse map.
+	remoteDevToSentry map[uint64]uint32 `state:"nosave"`
 
-	// inoByKey is the same as inoByQIDPath but only used by lisafs. It helps
-	// identify inodes based on the device ID and host inode number provided
-	// by the gofer process. It is not preserved across checkpoint/restore for
-	// the same reason as above. inoByKey is protected by inoMu.
-	inoByKey map[inoKey]uint64 `state:"nosave"`
+	// syntheticDevMinor is the minor device ID used for synthetic files.
+	// syntheticDevMinor is immutable.
+	syntheticDevMinor uint32
 
-	// lastIno is the last inode number assigned to a file. lastIno is accessed
-	// using atomic memory operations.
-	lastIno atomicbitops.Uint64
+	// lastSyntheticIno is the last inode number assigned to a synthetic file.
+	// lastIno is accessed using atomic memory operations.
+	lastSyntheticIno atomicbitops.Uint64
 
 	// savedDentryRW records open read/write handles during save/restore.
 	savedDentryRW map[*dentry]savedDentryRW
@@ -477,20 +473,19 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	// If !ok, iopts being the zero value is correct.
 
 	// Construct the filesystem object.
-	devMinor, err := vfsObj.GetAnonBlockDevMinor()
+	syntheticDevMinor, err := vfsObj.GetAnonBlockDevMinor()
 	if err != nil {
 		return nil, nil, err
 	}
 	fs := &filesystem{
-		mfp:              mfp,
-		opts:             fsopts,
-		iopts:            iopts,
-		clock:            ktime.RealtimeClockFromContext(ctx),
-		devMinor:         devMinor,
-		syncableDentries: make(map[*dentry]struct{}),
-		specialFileFDs:   make(map[*specialFileFD]struct{}),
-		inoByQIDPath:     make(map[uint64]uint64),
-		inoByKey:         make(map[inoKey]uint64),
+		mfp:               mfp,
+		opts:              fsopts,
+		iopts:             iopts,
+		clock:             ktime.RealtimeClockFromContext(ctx),
+		syntheticDevMinor: syntheticDevMinor,
+		syncableDentries:  make(map[*dentry]struct{}),
+		specialFileFDs:    make(map[*specialFileFD]struct{}),
+		remoteDevToSentry: make(map[uint64]uint32),
 	}
 
 	// Did the user configure a global dentry cache?
@@ -735,7 +730,13 @@ func (fs *filesystem) Release(ctx context.Context) {
 		}
 	}
 
-	fs.vfsfs.VirtualFilesystem().PutAnonBlockDevMinor(fs.devMinor)
+	vfs := fs.vfsfs.VirtualFilesystem()
+	vfs.PutAnonBlockDevMinor(fs.syntheticDevMinor)
+	fs.devMinorMu.RLock()
+	for _, devMinor := range fs.remoteDevToSentry {
+		vfs.PutAnonBlockDevMinor(devMinor)
+	}
+	fs.devMinorMu.RUnlock()
 }
 
 // releaseSyntheticRecursiveLocked traverses the tree with root d and decrements
@@ -760,23 +761,6 @@ func (d *dentry) releaseSyntheticRecursiveLocked(ctx context.Context) {
 				child.releaseSyntheticRecursiveLocked(ctx)
 			}
 		}
-	}
-}
-
-// inoKey is the key used to identify the inode backed by this dentry.
-//
-// +stateify savable
-type inoKey struct {
-	ino      uint64
-	devMinor uint32
-	devMajor uint32
-}
-
-func inoKeyFromStat(stat *linux.Statx) inoKey {
-	return inoKey{
-		ino:      stat.Ino,
-		devMinor: stat.DevMinor,
-		devMajor: stat.DevMajor,
 	}
 }
 
@@ -806,12 +790,6 @@ type dentry struct {
 	// filesystem root, name is the empty string. name is protected by
 	// filesystem.renameMu.
 	name string
-
-	// qidPath is the p9.QID.Path for this file. qidPath is immutable.
-	qidPath uint64
-
-	// inoKey is used to identify this dentry's inode.
-	inoKey inoKey
 
 	// file is the unopened p9.File that backs this dentry. file is immutable.
 	//
@@ -879,6 +857,7 @@ type dentry struct {
 	//     have atomic readers that don't hold the lock.
 	metadataMu sync.Mutex          `state:"nosave"`
 	ino        uint64              // immutable
+	devMinor   uint32              // immutable
 	mode       atomicbitops.Uint32 // type is immutable, perms are mutable
 	uid        atomicbitops.Uint32 // auth.KUID, but stored as raw uint32 for sync/atomic
 	gid        atomicbitops.Uint32 // auth.KGID, but ...
@@ -1022,12 +1001,16 @@ func (fs *filesystem) newDentry(ctx context.Context, file p9file, qid p9.QID, ma
 		ctx.Warningf("can't create regular file gofer.dentry without file size")
 		return nil, linuxerr.EIO
 	}
+	devMinor, err := fs.getOrCreateDevMinor(attr.RDev)
+	if err != nil {
+		return nil, err
+	}
 
 	d := &dentry{
 		fs:        fs,
-		qidPath:   qid.Path,
 		file:      file,
-		ino:       fs.inoFromQIDPath(qid.Path),
+		ino:       qid.Path,
+		devMinor:  devMinor,
 		mode:      atomicbitops.FromUint32(uint32(attr.Mode)),
 		uid:       atomicbitops.FromUint32(uint32(fs.opts.dfltuid)),
 		gid:       atomicbitops.FromUint32(uint32(fs.opts.dfltgid)),
@@ -1081,12 +1064,15 @@ func (fs *filesystem) newDentryLisa(ctx context.Context, ino *lisafs.Inode) (*de
 		ctx.Warningf("can't create regular file gofer.dentry without file size")
 		return nil, linuxerr.EIO
 	}
+	devMinor, err := fs.getOrCreateDevMinorLisa(ino.Stat.DevMinor, ino.Stat.DevMajor)
+	if err != nil {
+		return nil, err
+	}
 
-	inoKey := inoKeyFromStat(&ino.Stat)
 	d := &dentry{
 		fs:            fs,
-		inoKey:        inoKey,
-		ino:           fs.inoFromKey(inoKey),
+		ino:           ino.Stat.Ino,
+		devMinor:      devMinor,
 		mode:          atomicbitops.FromUint32(uint32(ino.Stat.Mode)),
 		uid:           atomicbitops.FromUint32(uint32(fs.opts.dfltuid)),
 		gid:           atomicbitops.FromUint32(uint32(fs.opts.dfltgid)),
@@ -1133,31 +1119,52 @@ func (fs *filesystem) newDentryLisa(ctx context.Context, ino *lisafs.Inode) (*de
 	return d, nil
 }
 
-func (fs *filesystem) inoFromKey(key inoKey) uint64 {
-	fs.inoMu.Lock()
-	defer fs.inoMu.Unlock()
-
-	if ino, ok := fs.inoByKey[key]; ok {
-		return ino
-	}
-	ino := fs.nextIno()
-	fs.inoByKey[key] = ino
-	return ino
+func (fs *filesystem) getOrCreateDevMinorLisa(remoteDevMinor uint32, remoteDevMajor uint32) (uint32, error) {
+	return fs.getOrCreateDevMinor(uint64(remoteDevMajor)<<32 | uint64(remoteDevMinor))
 }
 
-func (fs *filesystem) inoFromQIDPath(qidPath uint64) uint64 {
-	fs.inoMu.Lock()
-	defer fs.inoMu.Unlock()
-	if ino, ok := fs.inoByQIDPath[qidPath]; ok {
-		return ino
+func (fs *filesystem) getOrCreateDevMinor(remoteDev uint64) (uint32, error) {
+	// Fast path: mapping for remoteDev already exists.
+	fs.devMinorMu.RLock()
+	devMinor, ok := fs.remoteDevToSentry[remoteDev]
+	fs.devMinorMu.RUnlock()
+	if ok {
+		return devMinor, nil
 	}
-	ino := fs.nextIno()
-	fs.inoByQIDPath[qidPath] = ino
-	return ino
+
+	fs.devMinorMu.Lock()
+	defer fs.devMinorMu.Unlock()
+
+	// Mapping for remoteDev could have been created between RUnlock and Lock.
+	devMinor, ok = fs.remoteDevToSentry[remoteDev]
+	if ok {
+		return devMinor, nil // We raced.
+	}
+	devMinor, err := fs.vfsfs.VirtualFilesystem().GetAnonBlockDevMinor()
+	if err == nil {
+		fs.remoteDevToSentry[remoteDev] = devMinor
+	}
+	return devMinor, err
 }
 
-func (fs *filesystem) nextIno() uint64 {
-	return fs.lastIno.Add(1)
+// getDeviceMinorLisa is the same as getDeviceMinor, but for lisafs.
+func (fs *filesystem) getDeviceMinorLisa(remoteDevMinor uint32, remoteDevMajor uint32) uint32 {
+	return fs.getDeviceMinor(uint64(remoteDevMajor)<<32 | uint64(remoteDevMinor))
+}
+
+// getDeviceMinor gets the sentry internal device minor mapped to remoteDev. If
+// no such mapping exists, MaxUint32 is returned.
+func (fs *filesystem) getDeviceMinor(remoteDev uint64) uint32 {
+	fs.devMinorMu.RLock()
+	defer fs.devMinorMu.RUnlock()
+	if devMinor, ok := fs.remoteDevToSentry[remoteDev]; ok {
+		return devMinor
+	}
+	return math.MaxUint32
+}
+
+func (fs *filesystem) nextSyntheticIno() uint64 {
+	return fs.lastSyntheticIno.Add(1)
 }
 
 func (d *dentry) isSynthetic() bool {
@@ -1404,7 +1411,7 @@ func (d *dentry) statTo(stat *linux.Statx) {
 	stat.Ctime = linux.NsecToStatxTimestamp(d.ctime.Load())
 	stat.Mtime = linux.NsecToStatxTimestamp(d.mtime.Load())
 	stat.DevMajor = linux.UNNAMED_MAJOR
-	stat.DevMinor = d.fs.devMinor
+	stat.DevMinor = d.devMinor
 }
 
 func (d *dentry) setStat(ctx context.Context, creds *auth.Credentials, opts *vfs.SetStatOptions, mnt *vfs.Mount) error {

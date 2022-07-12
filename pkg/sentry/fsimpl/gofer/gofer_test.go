@@ -20,18 +20,24 @@ import (
 	"gvisor.dev/gvisor/pkg/p9"
 	"gvisor.dev/gvisor/pkg/sentry/contexttest"
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+	"gvisor.dev/gvisor/pkg/sentry/vfs"
 )
 
 func TestDestroyIdempotent(t *testing.T) {
 	ctx := contexttest.Context(t)
+	vfsObj := &vfs.VirtualFilesystem{}
+	if err := vfsObj.Init(ctx); err != nil {
+		t.Fatalf("VFS init: %v", err)
+	}
 	fs := filesystem{
-		mfp:              pgalloc.MemoryFileProviderFromContext(ctx),
-		syncableDentries: make(map[*dentry]struct{}),
-		inoByQIDPath:     make(map[uint64]uint64),
-		inoByKey:         make(map[inoKey]uint64),
+		mfp:               pgalloc.MemoryFileProviderFromContext(ctx),
+		syncableDentries:  make(map[*dentry]struct{}),
+		remoteDevToSentry: make(map[uint64]uint32),
 		// Test relies on no dentry being held in the cache.
 		dentryCache: &dentryCache{maxCachedDentries: 0},
 	}
+	var fsType FilesystemType
+	fs.vfsfs.Init(vfsObj, &fsType, &fs)
 
 	attr := &p9.Attr{
 		Mode: p9.ModeRegular,
