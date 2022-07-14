@@ -275,10 +275,13 @@ type File interface {
 
 	// Readdir reads directory entries.
 	//
-	// This may return io.EOF in addition to unix.Errno values.
+	// This may return io.EOF in addition to unix.Errno values. count is the
+	// number of bytes to read. direntOffset is the offset, in terms of number of
+	// dirents, at which Readdir should return results. direntOffset is used more
+	// like a cookie.
 	//
 	// On the server, Readdir has a read concurrency guarantee.
-	Readdir(offset uint64, count uint32) ([]Dirent, error)
+	Readdir(direntOffset uint64, count uint32) ([]Dirent, error)
 
 	// Readlink reads the link target.
 	//

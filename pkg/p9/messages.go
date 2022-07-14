@@ -1916,8 +1916,8 @@ type Treaddir struct {
 	// Directory is the directory FID to read.
 	Directory FID
 
-	// Offset is the offset to read at.
-	Offset uint64
+	// DirentOffset is the dirent offset to read at.
+	DirentOffset uint64
 
 	// Count is the number of bytes to read.
 	Count uint32
@@ -1926,14 +1926,14 @@ type Treaddir struct {
 // decode implements encoder.decode.
 func (t *Treaddir) decode(b *buffer) {
 	t.Directory = b.ReadFID()
-	t.Offset = b.Read64()
+	t.DirentOffset = b.Read64()
 	t.Count = b.Read32()
 }
 
 // encode implements encoder.encode.
 func (t *Treaddir) encode(b *buffer) {
 	b.WriteFID(t.Directory)
-	b.Write64(t.Offset)
+	b.Write64(t.DirentOffset)
 	b.Write32(t.Count)
 }
 
@@ -1944,7 +1944,7 @@ func (*Treaddir) Type() MsgType {
 
 // String implements fmt.Stringer.
 func (t *Treaddir) String() string {
-	return fmt.Sprintf("Treaddir{DirectoryFID: %d, Offset: %d, Count: %d}", t.Directory, t.Offset, t.Count)
+	return fmt.Sprintf("Treaddir{DirectoryFID: %d, DirentOffset: %d, Count: %d}", t.Directory, t.DirentOffset, t.Count)
 }
 
 // Rreaddir is a readdir response.
@@ -1987,9 +1987,6 @@ func (r *Rreaddir) encode(b *buffer) {
 	payloadSize := 0
 	for _, d := range r.Entries {
 		d.encode(&entriesBuf)
-		if len(entriesBuf.data) > int(r.Count) {
-			break
-		}
 		payloadSize = len(entriesBuf.data)
 	}
 	r.Count = uint32(payloadSize)
