@@ -21,7 +21,6 @@ import (
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/fspath"
-	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/sentry/fsmetric"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
@@ -752,9 +751,12 @@ func (fs *filesystem) StatFSAt(ctx context.Context, rp *vfs.ResolvingPath) (linu
 // SymlinkAt implements vfs.FilesystemImpl.SymlinkAt.
 func (fs *filesystem) SymlinkAt(ctx context.Context, rp *vfs.ResolvingPath, target string) error {
 	return fs.doCreateAt(ctx, rp, false /* dir */, func(parentDir *directory, name string) error {
+		// Linux allocates a page to store symlink targets that have length larger
+		// than shortSymlinkLen. Targets are just stored as string here, but simulate
+		// the page accounting for it. See mm/shmem.c:shmem_symlink().
 		if len(target) >= shortSymlinkLen {
-			if err := fs.updatePagesUsed(0, uint64(len(target))); err != nil {
-				return err
+			if !fs.accountPages(1) {
+				return linuxerr.ENOSPC
 			}
 		}
 		creds := rp.Credentials()
@@ -933,41 +935,41 @@ func (fs *filesystem) MountOptions() string {
 	return fs.mopts
 }
 
-// updatePagesUsed updates the pagesUsed in filesystem struct
-// if tmpfs is mounted with size option.
-// Assumption: for all the int conversions overflow never occurs.
-func (fs *filesystem) updatePagesUsed(oldFileSize, newFileSize uint64) error {
-	if fs.maxSizeInPages == 0 {
-		return nil
+// accountPages increases the pagesUsed in filesystem struct if tmpfs
+// is mounted with size option. We return a false when the maxSizeInPages
+// has been exhausted and no more allocation can be done.
+func (fs *filesystem) accountPages(pagesInc uint64) bool {
+	if fs.maxSizeInPages == 0 || pagesInc == 0 {
+		return true // No accounting needed.
 	}
-	oldFileSizePages, ok := hostarch.ToPages(oldFileSize)
-	if !ok {
-		return linuxerr.EINVAL
-	}
-	newFileSizePages, ok := hostarch.ToPages(newFileSize)
-	if !ok {
-		return linuxerr.EINVAL
+	if fs.maxSizeInPages <= fs.pagesUsed {
+		return false
 	}
 
-	pagesDelta := int64(newFileSizePages) - int64(oldFileSizePages)
-	if pagesDelta == 0 {
-		// No update required.
-		return nil
-	}
 	// Need to acquire fs.pagesUsedMu for fs.pagesUsed.
 	fs.pagesUsedMu.Lock()
 	defer fs.pagesUsedMu.Unlock()
 	pagesFree := fs.maxSizeInPages - fs.pagesUsed
 
-	if int64(pagesFree) < pagesDelta {
-		return linuxerr.ENOSPC
+	if pagesFree < pagesInc {
+		return false
 	}
 
-	newPagesReqd := int64(fs.pagesUsed) + pagesDelta
-	if newPagesReqd < 0 {
-		panic("Deallocating more pages than allocated.")
-	}
+	fs.pagesUsed = fs.pagesUsed + pagesInc
+	return true
+}
 
-	fs.pagesUsed = uint64(newPagesReqd)
-	return nil
+// unaccountPages decreases the pagesUsed in filesystem struct if tmpfs
+// is mounted with size option.
+func (fs *filesystem) unaccountPages(pagesDec uint64) {
+	if fs.maxSizeInPages == 0 || pagesDec == 0 {
+		return
+	}
+	// Need to acquire fs.pagesUsedMu for fs.pagesUsed.
+	fs.pagesUsedMu.Lock()
+	defer fs.pagesUsedMu.Unlock()
+	if fs.pagesUsed < pagesDec {
+		panic(fmt.Sprintf("Deallocating more pages than allocated: fs.pagesUsed = %d, pagesDec = %d", fs.pagesUsed, pagesDec))
+	}
+	fs.pagesUsed = fs.pagesUsed - pagesDec
 }

@@ -138,11 +138,6 @@ func newUnlinkedRegularFileDescription(ctx context.Context, creds *auth.Credenti
 // Preconditions: mount must be a tmpfs mount.
 func NewZeroFile(ctx context.Context, creds *auth.Credentials, mount *vfs.Mount, size uint64) (*vfs.FileDescription, error) {
 	// Compare mm/shmem.c:shmem_zero_setup().
-	fs := mount.Filesystem().Impl().(*filesystem)
-	if err := fs.updatePagesUsed(0, size); err != nil {
-		return nil, err
-	}
-
 	fd, err := newUnlinkedRegularFileDescription(ctx, creds, mount, "dev/zero")
 	if err != nil {
 		return nil, err
@@ -185,10 +180,6 @@ func (rf *regularFile) growLocked(newSize uint64) error {
 	if rf.seals&linux.F_SEAL_GROW != 0 {
 		return linuxerr.EPERM
 	}
-	// We only need to update the file size.
-	if err := rf.inode.fs.updatePagesUsed(rf.size.Load(), newSize); err != nil {
-		return err
-	}
 	rf.size.Store(newSize)
 	return nil
 }
@@ -215,11 +206,6 @@ func (rf *regularFile) truncateLocked(newSize uint64) (bool, error) {
 		return false, linuxerr.EPERM
 	}
 
-	// Update the file size.
-	if err := rf.inode.fs.updatePagesUsed(rf.size.Load(), newSize); err != nil {
-		rf.dataMu.Unlock()
-		return false, err
-	}
 	rf.size.Store(newSize)
 	rf.dataMu.Unlock()
 
@@ -239,8 +225,9 @@ func (rf *regularFile) truncateLocked(newSize uint64) (bool, error) {
 	// We are now guaranteed that there are no translations of truncated pages,
 	// and can remove them.
 	rf.dataMu.Lock()
-	rf.data.Truncate(newSize, rf.memFile)
+	decPages := rf.data.Truncate(newSize, rf.memFile)
 	rf.dataMu.Unlock()
+	rf.inode.fs.unaccountPages(decPages)
 	return true, nil
 }
 
@@ -315,6 +302,10 @@ func (rf *regularFile) Translate(ctx context.Context, required, optional memmap.
 		optional.End = pgend
 	}
 
+	pagesReqd := rf.data.PagesToFill(required, optional)
+	if !rf.inode.fs.accountPages(pagesReqd) {
+		return nil, linuxerr.ENOSPC
+	}
 	cerr := rf.data.Fill(ctx, required, optional, rf.size.RacyLoad(), rf.memFile, rf.memoryUsageKind, func(_ context.Context, dsts safemem.BlockSeq, _ uint64) (uint64, error) {
 		// Newly-allocated pages are zeroed, so we don't need to do anything.
 		return dsts.NumBytes(), nil
@@ -336,9 +327,11 @@ func (rf *regularFile) Translate(ctx context.Context, required, optional memmap.
 	// Don't return the error returned by f.data.Fill if it occurred outside of
 	// required.
 	if translatedEnd < required.End && cerr != nil {
+		rf.inode.fs.unaccountPages(pagesReqd)
 		return ts, &memmap.BusError{cerr}
 	}
 	if beyondEOF {
+		rf.inode.fs.unaccountPages(pagesReqd)
 		return ts, &memmap.BusError{io.EOF}
 	}
 	return ts, nil
@@ -386,10 +379,15 @@ func (fd *regularFileFD) Allocate(ctx context.Context, mode, offset, length uint
 		return linuxerr.EFBIG
 	}
 	required := memmap.MappableRange{Start: uint64(pgstartaddr), End: uint64(pgendaddr)}
+	pagesReqd := f.data.PagesToFill(required, required)
+	if !f.inode.fs.accountPages(pagesReqd) {
+		return linuxerr.ENOSPC
+	}
 	if err := f.data.Fill(ctx, required, required, newSize, f.memFile, f.memoryUsageKind, func(_ context.Context, dsts safemem.BlockSeq, _ uint64) (uint64, error) {
 		// Newly-allocated pages are zeroed, so we don't need to do anything.
 		return dsts.NumBytes(), nil
 	}); err != nil && err != io.EOF {
+		f.inode.fs.unaccountPages(pagesReqd)
 		return err
 	}
 
@@ -481,29 +479,11 @@ func (fd *regularFileFD) pwrite(ctx context.Context, src usermem.IOSequence, off
 	if err != nil {
 		return 0, offset, err
 	}
-
-	// Reserve enough space assuming the entire write was successful. The
-	// corresponding update to f.size is done in WriteFromBlocks() which is
-	// called via src.CopyInTo() below.
-	maybeSizeInc := false
 	src = src.TakeFirst64(srclen)
-	if uint64(end) > f.size.Load() {
-		maybeSizeInc = true
-		if err = f.inode.fs.updatePagesUsed(f.size.Load(), uint64(end)); err != nil {
-			return 0, 0, err
-		}
-	}
 
 	// Perform the write.
 	rw := getRegularFileReadWriter(f, offset)
 	n, err := src.CopyInTo(ctx, rw)
-
-	// Correct page accounting if this was a partial write.
-	if maybeSizeInc && srclen-n != 0 {
-		if err := f.inode.fs.updatePagesUsed(uint64(end), f.size.Load()); err != nil {
-			return 0, 0, err
-		}
-	}
 
 	f.inode.touchCMtimeLocked()
 	for {
@@ -719,9 +699,13 @@ func (rw *regularFileReadWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64,
 		case gap.Ok():
 			// Allocate memory for the write.
 			gapMR := gap.Range().Intersect(pgMR)
+			if !rw.file.inode.fs.accountPages(gapMR.Length() / hostarch.PageSize) {
+				return 0, linuxerr.ENOSPC
+			}
 			fr, err := rw.file.memFile.Allocate(gapMR.Length(), pgalloc.AllocOpts{Kind: rw.file.memoryUsageKind})
 			if err != nil {
 				retErr = err
+				rw.file.inode.fs.unaccountPages(gapMR.Length() / hostarch.PageSize)
 				goto exitLoop
 			}
 

@@ -622,6 +622,19 @@ TEST(MountTest, TmpfsEmptySizeAllocCheck) {
               SyscallFailsWithErrno(EINVAL));
 }
 
+// Tests memory allocation on deleted file is not counted towards tmpfs size.
+TEST(MountTest, TmpfsUnlinkRegularFileAllocCheck) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
+  auto const dir = ASSERT_NO_ERRNO_AND_VALUE(TempPath::CreateDir());
+  auto tmpfs_size_opt = absl::StrCat("size=", kPageSize);
+  const int kTruncateSize = 2 * kPageSize;
+  auto const mount = ASSERT_NO_ERRNO_AND_VALUE(
+      Mount("", dir.path(), "tmpfs", 0, tmpfs_size_opt, 0));
+  const std::string fileOne = JoinPath(dir.path(), "foo1");
+  auto fd = ASSERT_NO_ERRNO_AND_VALUE(Open(fileOne, O_CREAT | O_RDWR, 0777));
+  EXPECT_THAT(unlink(fileOne.c_str()), SyscallSucceeds());
+  EXPECT_THAT(ftruncate(fd.get(), kTruncateSize), SyscallSucceeds());
+}
 }  // namespace
 
 }  // namespace testing
