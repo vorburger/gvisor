@@ -22,6 +22,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -130,6 +131,10 @@ type Container struct {
 	// processes.
 	Saver StateFile `json:"saver"`
 
+	// RootFilestoreFile is the host file which backs the root mount's overlay
+	// upper layer.
+	RootFilestoreFile string `json:"rootFilestoreFile"`
+
 	//
 	// Fields below this line are not saved in the state file and will not
 	// be preserved across commands.
@@ -195,6 +200,18 @@ func New(conf *config.Config, args Args) (*Container, error) {
 		}
 	}
 
+	rootOverlay := ""
+	if conf.RootOverlay != "" {
+		// Create a new file, which is unique to this container.
+		f, err := os.CreateTemp(path.Dir(conf.RootOverlay), path.Base(conf.RootOverlay)+"*")
+		if err != nil {
+			return nil, fmt.Errorf("os.CreateTemp() failed to create root overlay filestore file: %v", err)
+		}
+		rootOverlay = f.Name()
+		log.Infof("Using %s as the root overlay filestore.", rootOverlay)
+		f.Close()
+	}
+
 	c := &Container{
 		ID:            args.ID,
 		Spec:          args.Spec,
@@ -210,6 +227,7 @@ func New(conf *config.Config, args Args) (*Container, error) {
 				ContainerID: args.ID,
 			},
 		},
+		RootFilestoreFile: rootOverlay,
 	}
 	// The Cleanup object cleans up partially created containers when an error
 	// occurs. Any errors occurring during cleanup itself are ignored.
@@ -274,6 +292,13 @@ func New(conf *config.Config, args Args) (*Container, error) {
 				MountsFile:    specFile,
 				Cgroup:        parentCgroup,
 				Attached:      args.Attached,
+			}
+			if c.RootFilestoreFile != "" {
+				rootOverlayFD, err := os.OpenFile(c.RootFilestoreFile, os.O_RDWR, 0666)
+				if err != nil {
+					return fmt.Errorf("failed to create root overlay host file %q: %v", c.RootFilestoreFile, err)
+				}
+				sandArgs.RootFileStoreFD = rootOverlayFD
 			}
 			sand, err := sandbox.New(conf, sandArgs)
 			if err != nil {
@@ -758,6 +783,18 @@ func (c *Container) Destroy() error {
 		err = fmt.Errorf("deleting container state files: %v", err)
 		log.Warningf("%v", err)
 		errs = append(errs, err.Error())
+	}
+
+	if c.RootFilestoreFile != "" {
+		if err := os.Remove(c.RootFilestoreFile); err != nil {
+			err = fmt.Errorf("deleting root mount filestore file at %q: %v", c.RootFilestoreFile, err)
+			log.Warningf("%v", err)
+			errs = append(errs, err.Error())
+		} else {
+			// Destroy is safe to call multiple times. So once deleted, prevent the
+			// deletion attempt next time.
+			c.RootFilestoreFile = ""
+		}
 	}
 
 	c.changeStatus(Stopped)

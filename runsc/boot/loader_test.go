@@ -134,6 +134,7 @@ func createLoader(spec *specs.Spec) (*Loader, func(), error) {
 		ControllerFD:    fd,
 		GoferFDs:        []int{sandEnd},
 		StdioFDs:        stdio,
+		RootFilestoreFD: -1,
 		PodInitConfigFD: -1,
 	}
 	l, err := New(args)

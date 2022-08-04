@@ -70,8 +70,14 @@ type Config struct {
 	// FileAccessMounts indicates how non-root volumes are accessed.
 	FileAccessMounts FileAccessType `flag:"file-access-mounts"`
 
-	// Overlay is whether to wrap the root filesystem in an overlay.
+	// Overlay is whether to wrap all mounts in an overlay.
 	Overlay bool `flag:"overlay"`
+
+	// RootOverlay dictates whether to wrap the root mount in an overlay with
+	// a tmpfs upper layer which is backed by a host file. This takes precedence
+	// over the overlay flag. This flag specifies the host file that will back
+	// the tmpfs mount.
+	RootOverlay string `flag:"root-overlay"`
 
 	// FSGoferHostUDS enables the gofer to create and connect to host unix
 	// domain sockets.

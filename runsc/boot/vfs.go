@@ -46,6 +46,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/specutils"
@@ -322,6 +323,10 @@ type containerMounter struct {
 	// fds is the list of FDs to be dispensed for mounts that require it.
 	fds fdDispenser
 
+	// rootFilestore is the host FD to a regular file which will be used to
+	// back the root mount's tmpfs upper mount.
+	rootFilestore *pgalloc.MemoryFile
+
 	k *kernel.Kernel
 
 	hints *podMountHints
@@ -333,12 +338,13 @@ type containerMounter struct {
 
 func newContainerMounter(info *containerInfo, k *kernel.Kernel, hints *podMountHints, productName string) *containerMounter {
 	return &containerMounter{
-		root:        info.spec.Root,
-		mounts:      compileMounts(info.spec, info.conf),
-		fds:         fdDispenser{fds: info.goferFDs},
-		k:           k,
-		hints:       hints,
-		productName: productName,
+		root:          info.spec.Root,
+		mounts:        compileMounts(info.spec, info.conf),
+		fds:           fdDispenser{fds: info.goferFDs},
+		rootFilestore: info.rootFilestore,
+		k:             k,
+		hints:         hints,
+		productName:   productName,
 	}
 }
 
@@ -425,11 +431,11 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, conf *confi
 	}
 
 	fsName := gofer.Name
-	if conf.Overlay && !c.root.Readonly {
+	if (conf.Overlay || conf.RootOverlay != "") && !c.root.Readonly {
 		log.Infof("Adding overlay on top of root")
 		var err error
 		var cleanup func()
-		opts, cleanup, err = c.configureOverlay(ctx, creds, opts, fsName)
+		opts, cleanup, err = c.configureOverlay(ctx, creds, opts, fsName, true /* isRoot */)
 		if err != nil {
 			return nil, fmt.Errorf("mounting root with overlay: %w", err)
 		}
@@ -448,7 +454,7 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, conf *confi
 // layer using tmpfs, and return overlay mount options. "cleanup" must be called
 // after the options have been used to mount the overlay, to release refs on
 // lower and upper mounts.
-func (c *containerMounter) configureOverlay(ctx context.Context, creds *auth.Credentials, lowerOpts *vfs.MountOptions, lowerFSName string) (*vfs.MountOptions, func(), error) {
+func (c *containerMounter) configureOverlay(ctx context.Context, creds *auth.Credentials, lowerOpts *vfs.MountOptions, lowerFSName string, isRoot bool) (*vfs.MountOptions, func(), error) {
 	// First copy options from lower layer to upper layer and overlay. Clear
 	// filesystem specific options.
 	upperOpts := *lowerOpts
@@ -486,9 +492,13 @@ func (c *containerMounter) configureOverlay(ctx context.Context, creds *auth.Cre
 	}
 
 	// Upper is a tmpfs mount to keep all modifications inside the sandbox.
-	upperOpts.GetFilesystemOptions.InternalData = tmpfs.FilesystemOpts{
+	tmpfsOpts := tmpfs.FilesystemOpts{
 		RootFileType: uint16(rootType),
 	}
+	if isRoot {
+		tmpfsOpts.Filestore = c.rootFilestore
+	}
+	upperOpts.GetFilesystemOptions.InternalData = tmpfsOpts
 	upper, err := c.k.VFS().MountDisconnected(ctx, creds, "" /* source */, tmpfs.Name, &upperOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create upper layer for overlay, opts: %+v: %v", upperOpts, err)
@@ -650,7 +660,7 @@ func (c *containerMounter) mountSubmount(ctx context.Context, conf *config.Confi
 	if useOverlay {
 		log.Infof("Adding overlay on top of mount %q", submount.mount.Destination)
 		var cleanup func()
-		opts, cleanup, err = c.configureOverlay(ctx, creds, opts, fsName)
+		opts, cleanup, err = c.configureOverlay(ctx, creds, opts, fsName, false /* isRoot */)
 		if err != nil {
 			return nil, fmt.Errorf("mounting volume with overlay at %q: %w", submount.mount.Destination, err)
 		}
@@ -885,7 +895,7 @@ func (c *containerMounter) mountSharedMaster(ctx context.Context, conf *config.C
 	if useOverlay {
 		log.Infof("Adding overlay on top of shared mount %q", mntFD.mount.Destination)
 		var cleanup func()
-		opts, cleanup, err = c.configureOverlay(ctx, creds, opts, fsName)
+		opts, cleanup, err = c.configureOverlay(ctx, creds, opts, fsName, false /* isRoot */)
 		if err != nil {
 			return nil, fmt.Errorf("mounting shared volume with overlay at %q: %w", mntFD.mount.Destination, err)
 		}

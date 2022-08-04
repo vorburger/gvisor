@@ -78,6 +78,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 	flagSet.Var(fileAccessTypePtr(FileAccessExclusive), "file-access", "specifies which filesystem validation to use for the root mount: exclusive (default), shared.")
 	flagSet.Var(fileAccessTypePtr(FileAccessShared), "file-access-mounts", "specifies which filesystem validation to use for volumes other than the root mount: shared (default), exclusive.")
 	flagSet.Bool("overlay", false, "wrap filesystem mounts with writable overlay. All modifications are stored in memory inside the sandbox.")
+	flagSet.String("root-overlay", "/tmp/THIS_IS_FOR_TESTING_ONLY", "wrap the root mount in an overlay with a tmpfs upper layer which is backed by a host file. This takes precedence over the overlay flag. This flag specifies the host file that will back the tmpfs mount.")
 	flagSet.Bool("fsgofer-host-uds", false, "allow the gofer to mount Unix Domain Sockets.")
 	flagSet.Bool("vfs2", true, "DEPRECATED: this flag has no effect.")
 	flagSet.Bool("fuse", false, "TEST ONLY; use while FUSE in VFSv2 is landing. This allows the use of the new experimental FUSE filesystem.")

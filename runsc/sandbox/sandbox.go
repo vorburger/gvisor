@@ -158,6 +158,10 @@ type Args struct {
 	// the spec.
 	IOFiles []*os.File
 
+	// RootFileStoreFD is the regular file FD that will back the tmpfs upper
+	// mount in the root overlay mount.
+	RootFileStoreFD *os.File
+
 	// MountsFile is a file container mount information from the spec. It's
 	// equivalent to the mounts from the spec, except that all paths have been
 	// resolved to their final absolute location.
@@ -592,6 +596,7 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 
 	// If there is a gofer, sends all socket ends to the sandbox.
 	donations.DonateAndClose("io-fds", args.IOFiles...)
+	donations.DonateAndClose("root-filestore-fd", args.RootFileStoreFD)
 	donations.DonateAndClose("mounts-fd", args.MountsFile)
 	donations.Donate("start-sync-fd", startSyncFile)
 	if err := donations.OpenAndDonate("user-log-fd", args.UserLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND); err != nil {

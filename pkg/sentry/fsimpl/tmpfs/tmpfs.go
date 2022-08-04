@@ -129,6 +129,10 @@ type FilesystemOpts struct {
 
 	// MaxFilenameLen is the maximum filename length allowed by the tmpfs.
 	MaxFilenameLen int
+
+	// Filestore is the host file which will host all the file data. If this is
+	// nil, then application memory is used to host all the file data.
+	Filestore *pgalloc.MemoryFile
 }
 
 // GetFilesystem implements vfs.FilesystemType.GetFilesystem.
@@ -147,6 +151,9 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		}
 		if tmpfsOpts.FilesystemType != nil {
 			newFSType = tmpfsOpts.FilesystemType
+		}
+		if tmpfsOpts.Filestore != nil {
+			mfp = tmpfsOpts.Filestore
 		}
 	}
 

@@ -1106,6 +1106,11 @@ func (f *MemoryFile) String() string {
 	return f.usage.String()
 }
 
+// MemoryFile implements MemoryFileProvider.MemoryFile.
+func (f *MemoryFile) MemoryFile() *MemoryFile {
+	return f
+}
+
 // runReclaim implements the reclaimer goroutine, which continuously decommits
 // reclaimable pages in order to reduce memory usage and make them available
 // for allocation.
